@@ -98,21 +98,23 @@ void dataTimerISR() {
   [byte 16][bit 0] = JOG direction (1 = forward, 0 = reverse)
   [byte 16][bit 1] = JOG touch enable (1 = enabled, 0 = disabled)
   */
-  for(int i = 0; i < 10; i++) {
+  if(calculateCRC((uint8_t*)panelRxBuffer, 11) == panelRxBuffer[11]) {
+    for(int i = 0; i < 10; i++) {
     masterTxBuffer[i] = panelRxBuffer[i]; // Copy the first 10 bytes from panelRxBuffer to masterTxBuffer
+    }
   }
 
-  masterTxBuffer[10] = (adin >> 8) & 0x03; // PITCH MSB
-  masterTxBuffer[11] = adin & 0xFF;        // PITCH LSB
-  masterTxBuffer[12] = (adct >> 8) & 0x03; // PITCH CENTER MSB
-  masterTxBuffer[13] = adct & 0xFF;        // PITCH CENTER LSB
-  masterTxBuffer[14] = (jogVelocity >> 8) & 0xFF; // JOG POSITION MSB
-  masterTxBuffer[15] = jogVelocity & 0xFF;        // JOG POSITION LSB
-  masterTxBuffer[16] = (jogMoving ? 1 : 0);       // JOG direction
-  masterTxBuffer[16] |= (jogTouched ? 1 : 0) << 1; // JOG touch enable
+  masterTxBuffer[10] = (adin >> 8) & 0x03;          // PITCH MSB
+  masterTxBuffer[11] = adin & 0xFF;                 // PITCH LSB
+  masterTxBuffer[12] = (adct >> 8) & 0x03;          // PITCH CENTER MSB
+  masterTxBuffer[13] = adct & 0xFF;                 // PITCH CENTER LSB
+  masterTxBuffer[14] = (jogVelocity >> 8) & 0xFF;   // JOG POSITION MSB
+  masterTxBuffer[15] = jogVelocity & 0xFF;          // JOG POSITION LSB
+  masterTxBuffer[16] = (jogMoving ? 1 : 0);         // JOG direction
+  masterTxBuffer[16] |= (jogTouched ? 1 : 0) << 1;  // JOG touch enable
 
   //Last masterTxBuffer[17] is CRC 
-  masterTxBuffer[17] = calculateCRC((uint8_t*)masterTxBuffer, 18);
+  masterTxBuffer[17] = calculateCRC((uint8_t*)masterTxBuffer, 17);
 
 }
 
