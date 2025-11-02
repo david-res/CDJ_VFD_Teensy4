@@ -24,6 +24,9 @@ ST7796s_t4_mm lcd = ST7796s_t4_mm(ST7796_DC, ST7796_CS, ST7796_RST);
 QuadEncoder jogEncoder(0, JOG0, JOG1);
 
 IntervalTimer dataTimer;
+
+
+
 //CDJ PANEL VARS AND SETTINGS
 // Define constants
 const uint8_t FRAME_SIZE = 12;
@@ -67,7 +70,9 @@ lv_display_t* disp; // pointer to lvgl display object
 lv_obj_t * screen;
 void createScreen();
 void createVFD();
-void updateVDF();
+void updateVFD();
+
+uint8_t calculateCRC(uint8_t* data, size_t length);
 
 lv_obj_t * vfd_scale;
 lv_obj_t * play_pos_obj;
@@ -105,6 +110,9 @@ void dataTimerISR() {
   masterTxBuffer[15] = jogVelocity & 0xFF;        // JOG POSITION LSB
   masterTxBuffer[16] = (jogMoving ? 1 : 0);       // JOG direction
   masterTxBuffer[16] |= (jogTouched ? 1 : 0) << 1; // JOG touch enable
+
+  //Last masterTxBuffer[17] is CRC 
+  masterTxBuffer[17] = calculateCRC((uint8_t*)masterTxBuffer, 18);
 
 }
 
@@ -233,7 +241,7 @@ void loop() {
   if (currentMillis - previousMillis1 >=20) {
     // Save the last time lv_timer_handler was called
     previousMillis1 = currentMillis;
-    updateVDF();
+    updateVFD();
   }
 
 
@@ -292,7 +300,7 @@ void loop() {
 }
 
 
-uint8_t calculateCRC(const uint8_t* data, size_t length) {
+uint8_t calculateCRC(uint8_t* data, size_t length) {
   uint16_t crc = 0;
   for (size_t i = 0; i < length; i++) {
     crc += data[i];
@@ -432,7 +440,7 @@ void createVFD(){
 }
 
 
-void updateVDF(){
+void updateVFD(){
   static uint8_t lastVDFPos = 0;
   static bool lastTouchState = false;
   static bool lastVinylState = false;

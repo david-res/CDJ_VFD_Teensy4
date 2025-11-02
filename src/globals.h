@@ -51,7 +51,7 @@ These commands are copied from the panelTxBuffer and sent over SPI/I2C/Serial to
 [3 byte][bit 1] = JOG Vinyl indiocator
 [4 byte] = JOG indicator position (0…135)
 */
-uint8_t masterRxBuffer[27]; 
+uint8_t masterRxBuffer[18]; 
 
 
 /*
@@ -118,7 +118,7 @@ uint8_t panelTxBuffer[2][12]={
 [byte 16][bit 0] = JOG direction (1 = forward, 0 = reverse)
 [byte 16][bit 1] = JOG touch enable (1 = enabled, 0 = disabled)
 */
-volatile uint8_t masterTxBuffer[16];
+volatile uint8_t masterTxBuffer[18];
 
 
 
