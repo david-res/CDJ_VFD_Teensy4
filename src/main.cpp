@@ -43,12 +43,13 @@ bool waitingForWaitPin = false;
 
 //JOG+TOUCH VARS AND SETTINGS
 volatile uint32_t lastPulseMicros = 0;
-volatile uint16_t jogVelocity = 65535;  // time between pulses in µs (clamped)
-volatile int32_t jogDirection = 0;
-volatile bool jogMoving = false;
-
-volatile bool touchLatched = false;
+volatile uint16_t jogVelocity = 65535;
+bool jogMoving = false;
+bool touchLatched = false;
 bool touchActive = false;
+bool jogTouched = false;  // Final indicator
+
+
 Bounce touchDebouncer = Bounce();
 
 uint16_t adin = 0;
@@ -66,6 +67,7 @@ lv_display_t* disp; // pointer to lvgl display object
 lv_obj_t * screen;
 void createScreen();
 void createVFD();
+void updateVDF();
 
 lv_obj_t * vfd_scale;
 lv_obj_t * play_pos_obj;
@@ -102,7 +104,7 @@ void dataTimerISR() {
   masterTxBuffer[14] = (jogVelocity >> 8) & 0xFF; // JOG POSITION MSB
   masterTxBuffer[15] = jogVelocity & 0xFF;        // JOG POSITION LSB
   masterTxBuffer[16] = (jogMoving ? 1 : 0);       // JOG direction
-  masterTxBuffer[16] |= (touchActive ? 1 : 0) << 1; // JOG touch enable
+  masterTxBuffer[16] |= (jogTouched ? 1 : 0) << 1; // JOG touch enable
 
 }
 
@@ -118,8 +120,6 @@ void jogISR() {
     jogVelocity = (uint16_t)delta;
   }
 
-  int dir = digitalReadFast(JOG1) ? 1 : -1;
-  jogDirection += dir;
   jogMoving = true;
 
   if (touchActive) {
@@ -245,38 +245,39 @@ void loop() {
   if (millis() - lastCheck > 10) {
     lastCheck = millis();
 
+    // Get position from hardware encoder
     static int32_t lastPosition = 0;
-    int32_t currentPos = jogDirection;
+    int32_t currentPos = jogEncoder.read();
     uint32_t timeSinceLastPulse = micros() - lastPulseMicros;
 
+    // Calculate direction: 1 = forward, 0 = reverse
+    int direction = (currentPos >= lastPosition) ? 1 : 0;
+
+    // Check if stopped
     if (currentPos == lastPosition && timeSinceLastPulse > UINT16_MAX) {
       jogMoving = false;
 
       if (touchLatched) {
-       // Serial.println("Touch released after jog stop");
+        // Serial.println("Touch released after jog stop");
         touchLatched = false;
       }
     }
     lastPosition = currentPos;
 
+    // Update final touch indicator
+    jogTouched = touchActive || touchLatched;
 
+    // Optional: Print debug info
     static int32_t lastPrintedPos = 0;
-    int32_t pos = jogDirection;
+    int32_t pos = currentPos;
     if (pos != lastPrintedPos) {
       uint16_t v = jogVelocity;
-      //Serial.printf("JogPos: %ld, jogVelocity (Δt): %u µs, TouchLatched: %d\n",pos, v, touchLatched);
+      Serial.printf("JogPos: %ld, Dir: %d, Vel (Δt): %u µs, Touch: %d (Active:%d Latched:%d)\n", 
+                    pos, direction, v, jogTouched, touchActive, touchLatched);
       lastPrintedPos = pos;
     }
   }
 
-  
-  if (touchLatched || touchActive){
-    masterTxBuffer[16]|= 0x01; // Set JOG touch enable bit
-  }
-
-  else {
-    masterTxBuffer[16] &= ~0x01; // Clear JOG touch enable bit
-  }
 /*
   if (slaveSPI.flag_transaction_completed)
     {
