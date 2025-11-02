@@ -1,0 +1,670 @@
+#include "Arduino.h"
+//#include "RemoteDisplay.h"
+#include "lvgl.h"
+#include "SPI.h"
+#include "SPISlave_T4.h"
+#include "ILI9341_T4.h"
+
+SPISlave_T4<&SPI, SPI_8_BITS> slaveSPI; // Slave settings for the main control unit to control this Teensy. It will be sening and reciving masterRxBuffer and masterTxBuffer
+SPISettings panelSPI(1000000, LSBFIRST, SPI_MODE3); // Master settings for controlling the CDJ1000 MK1 control panel. It needs bus speed set at 1Mhz, SPI mode3 and LSB first.
+
+#define PIN_RESET 8
+#define PIN_DC  9  
+#define PIN_CS 10   
+#define PIN_MOSI    11    
+#define PIN_MISO    12 
+#define PIN_SCK     13      
+     
+
+// 40MHz SPI. Can do much better with short wires
+#define SPI_SPEED       50000000
+// screen size in landscape mode
+#define LX  320
+#define LY  240
+// 2 diff buffers with about 8K memory each
+ILI9341_T4::DiffBuffStatic<8000> diff1;
+ILI9341_T4::DiffBuffStatic<8000> diff2;
+// the internal framebuffer for the ILI9341_T4 driver (150KB) 
+// in DMAMEM to save space in the lower (faster) part of RAM. 
+DMAMEM uint16_t internal_fb[LX * LY];
+// the screen driver object
+ILI9341_T4::ILI9341Driver tft(PIN_CS, PIN_DC, PIN_SCK, PIN_MOSI, PIN_MISO, PIN_RESET, 255, 255);
+
+// number of lines in lvgl's internal draw buffer 
+#define BUF_LY 40
+lv_color_t lvgl_buf[LX * BUF_LY]; // memory for lvgl draw buffer (25KB) 
+
+lv_display_t* disp; // pointer to lvgl display object
+
+
+
+//RemoteDisplay remoteDisplay;
+
+lv_obj_t * screen;
+void createScreen();
+void createVFD();
+
+lv_obj_t * vfd_scale;
+lv_obj_t * play_pos_obj;
+
+
+/*
+[17 byte][bit0] = PLAY LED
+[17 byte][bit1] = CUE LED
+[17 byte][bit2] = LOOP IN LED
+[17 byte][bit3] = LOOP OUT LED
+[17 byte][bit4] = RELOOP EXIT LED
+[17 byte][bit5] = RED DIODE REVERSE
+[17 byte][bit6] = RED DIODE HOT CUE A
+[17 byte][bit7] = GREEN DIODE HOT CUE A
+[18 byte][bit0] = 0
+[18 byte][bit1] = RED DIODE HOT CUE B
+[18 byte][bit2] = GREEN DIODE HOT CUE B
+[18 byte][bit3] = 0
+[18 byte][bit4] = RED DIODE HOT CUE C
+[18 byte][bit5] = GREEN DIODE HOT CUE C
+[18 byte][bit6] = 0
+[18 byte][bit7] = 0
+[19 byte][bit3] = MT red diode on button
+[19 byte][bit4] = tempo reset green diode
+[19 byte][bit5] = Vinyl blue diode
+[19 byte][bit6] = CDJ green diode
+[19 byte][bit7] = SD card red diode
+[21 byte] CPOS 1…85 – jog display position CUE cursor 0 = without cue on jog display
+[23 byte][bit3] [bit4] = ”Vinyl ON” on VFD lamp
+[23 byte][bit5] = circle “touch enable” on VFD lamp
+[23 byte][bit6] = circle “memory empty” on VFD lamp
+[25 byte] = POS 1…135 – jog display position cursor 138 = eject animation 137 = load in animation 136 = fill circle on display
+*/
+uint8_t masterRxBuffer[27]; 
+
+
+/*
+[frame 9 ][9 byte][bit1] = PLAY LED
+[frame 9 ][9 byte][bit2] = CUE LED
+[frame 10][1 byte][bit6] = LOOP IN LED
+[frame 10][1 byte][bit7] = LOOP OUT LED
+[frame 9 ][9 byte][bit0] = RED DIODE REVERSE
+[frame 10][1 byte][bit0] = RED DIODE HOT CUE A
+[frame 10][1 byte][bit1] = GREEN DIODE HOT CUE A
+[frame 10][1 byte][bit2] = RED DIODE HOT CUE B
+[frame 10][1 byte][bit3] = GREEN DIODE HOT CUE B
+[frame 10][1 byte][bit4] = RED DIODE HOT CUE C
+[frame 10][1 byte][bit5] = GREEN DIODE HOT CUE C
+[frame 9 ][9 byte][bit5] = MT red diode on button
+[frame 9 ][9 byte][bit4] = tempo reset green diode
+[frame 10][2 byte][bit0] = Vinyl blue diode
+[frame 9 ][9 byte][bit7] = CDJ green diode
+[frame 9 ][9 byte][bit3] = SD card red diode
+*/
+uint8_t panelTxBuffer[2][12]={
+  {0x9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00}, 
+  {0xA, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+};
+
+
+
+/*
+[0-7packages][2 byte] = ADC data TOUCH/BRAKE 0…255 8 bits resolution
+[0-7packages][3 byte] = ADC data RELEASE/START 0…255 8 bits resolution
+[0-7packages][4 byte] = ADC Pitch MSB [AAAA] 0…1024 10 bits resolution
+[0-7packages][5 byte] = ADC Pitch LSB [AA00]
+[0-7packages][6 byte] = ADC Pitch Center Potentiometer MSB [AAAA] 0…1024 10 bits resolution
+[0-7packages][7 byte] = ADC Pitch Center Potentiometer LSB [AA00]
+[0-7packages][8 byte] = Jog Pulse Counter MSB 0…65535 16 bits resolution (3600 pulses per 1 round)
+[0-7packages][9 byte] = Jog Pulse Counter LSB
+[0-7packages][10 byte] = Jog Speed MSB 0…65535 16 bits resolution (when jog stopped speed = 65535)
+[0-7packages][11 byte] = Jog Speed LSB
+[0-7packages][12 byte][bit0] = Eject Lock switch: 1 = unlock / 0 = lock
+[0-7packages][12 byte][bit1] = Direction switch: 1 = forward / 0 = reverse
+[0-7packages][12 byte][bit2] = 0
+[0-7packages][12 byte][bit3] = 0
+[0-7packages][12 byte][bit4] = jog touch enable
+[0-7packages][12 byte][bit5] = jog touch enable
+[0-7packages][12 byte][bit6] – 1 = jog forward rotation / 0 = jog reverse rotation
+[0-7packages][12 byte][bit7] = jog rotation detect
+[0-7packages][14 byte][bit0] = PLAY button
+[0-7packages][14 byte][bit1] = CUE button
+[0-7packages][14 byte][bit2] = Loop IN button
+[0-7packages][14 byte][bit3] = Loop OUT button
+[0-7packages][14 byte][bit4] = Reloop/Exit button
+[0-7packages][14 byte][bit5] = Hot Cue A button
+[0-7packages][14 byte][bit6] = Hot Cue B button
+[0-7packages][14 byte][bit7] = Hot Cue C button
+[0-7packages][16 byte][bit0] = REC MODE
+[0-7packages][16 byte][bit1] = << Track search
+[0-7packages][16 byte][bit2] = Track search >>
+[0-7packages][16 byte][bit3] = << Search
+[0-7packages][16 byte][bit4] = Search >>
+[0-7packages][16 byte][bit5] = 0
+[0-7packages][16 byte][bit6] = 0
+[0-7packages][16 byte][bit7] = 0
+[0-7packages][17 byte][bit0] = < MP3 FOLDER SEARCH
+[0-7packages][17 byte][bit1] = MP3 FOLDER SEARCH >
+[0-7packages][17 byte][bit2] = JOG MODE button
+[0-7packages][17 byte][bit3] = TEMPO button
+[0-7packages][17 byte][bit4] = MASTER TEMPO button
+[0-7packages][17 byte][bit5] = TEMPO RESET button
+[0-7packages][17 byte][bit6] = 0
+[0-7packages][17 byte][bit7] = 0
+[0-7packages][18 byte][bit0] = CALL >
+[0-7packages][18 byte][bit1] = < CALL
+*/
+uint8_t masterTxBuffer[27];
+
+
+/*
+[0-7packages][8 byte] = ADC data TOUCH/BRAKE 0…255 8 bits resolution
+[0-7packages][9 byte] = ADC data RELEASE/START 0…255 8 bits resolution
+[0-7packages][6 byte][bit4] = Eject Lock switch: 1 = unlock / 0 = lock
+[0-7packages][7 byte][bit0] = Direction switch: 1 = forward / 0 = reverse
+[0-7packages][ byte][bit ] = PLAY button
+[0-7packages][3 byte][bit6] = CUE button
+[0-7packages][5 byte][bit7] = Loop IN button
+[0-7packages][5 byte][bit6] = Loop OUT button
+[0-7packages][5 byte][bit5] = Reloop/Exit button
+[0-7packages][4 byte][bit7] = Hot Cue A button
+[0-7packages][4 byte][bit6] = Hot Cue B button
+[0-7packages][4 byte][bit5] = Hot Cue C button
+[0-7packages][4 byte][bit4] = REC MODE
+[0-7packages][2 byte][bit4] = << Track search
+[0-7packages][ byte][bit] = Track search >>
+[0-7packages][ byte][bit] = << Search
+[0-7packages][ byte][bit] = Search >>
+[0-7packages][5 byte][bit4] = < MP3 FOLDER SEARCH
+[0-7packages][6 byte][bit1] = MP3 FOLDER SEARCH >
+[0-7packages][6 byte][bit2] = JOG MODE button
+[0-7packages][6 byte][bit7] = TEMPO button
+[0-7packages][6 byte][bit6] = MASTER TEMPO button
+[0-7packages][6 byte][bit5] = TEMPO RESET button
+[0-7packages][6 byte][bit0] = CALL >
+[0-7packages][5 byte][bit3] = < CALL
+*/
+uint8_t panelRxBuffer[12] = {0x0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+
+
+
+/** LVGL Callback to draw on the screen */
+void my_disp_flush(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
+    {
+    const bool redraw_now = lv_disp_flush_is_last(disp);  // check if when should update the screen (or just buffer the changes). 
+    tft.updateRegion(redraw_now, (uint16_t*)px_map, area->x1, area->x2, area->y1, area->y2); // update the interval framebuffer and then redraw the screen if requested
+    lv_disp_flush_ready(disp); // tell lvgl that we are done and that the lvgl draw buffer can be reused immediately  
+    }
+
+
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  //while (!Serial && millis() < 4000) {
+    // Wait for Serial
+  //}
+  Serial.println("Beninging");
+
+  tft.output(&Serial);                // send debug info to serial port.
+    while (!tft.begin(SPI_SPEED));      // init
+    tft.setFramebuffer(internal_fb);    // set the internal framebuffer
+    tft.setDiffBuffers(&diff1, &diff2); // set the diff buffers
+    tft.setRotation(3);                 // landscape mode 1 : 320x240
+    tft.setDiffGap(4);                  // with have large 8K diff buffers so we can use a small gap. 
+    tft.setVSyncSpacing(1);             // lvgl is already controlling framerate: we just set this to 1 to minimize screen tearing. 
+    tft.setRefreshRate(100);            // 100Hz refresh, why not...
+    tft.clear(0);                       // black screen to start. 
+
+
+  
+  
+  //remoteDisplay.init(SCREENWIDTH, SCREENHEIGHT, 0);
+  //remoteDisplay.registerRefreshCallback(refreshDisplayCallback);
+
+  lv_init();
+  disp = lv_display_create(LX, LY);
+    lv_display_set_flush_cb(disp, my_disp_flush);
+    lv_display_set_buffers(disp, lvgl_buf, nullptr, LX * BUF_LY * sizeof(int16_t), LV_DISPLAY_RENDER_MODE_PARTIAL);
+
+  lv_tick_set_cb(millis);
+
+  createScreen();
+  createVFD();
+  Serial.println("Screen & VFD created");
+  
+}
+
+
+// Define constants
+const uint8_t FRAME_SIZE = 12;
+const uint16_t FRAME_DELAY_US = 3000;
+const uint16_t BYTE_DELAY_US = 200;
+
+// Define variables for non-blocking operation
+unsigned long frameStartTime = 0;
+unsigned long byteStartTime = 0;
+size_t currentFrameIndex = 0;
+size_t currentByteIndex = 0;
+uint8_t currentFrame[FRAME_SIZE];
+uint8_t rxBuffer[FRAME_SIZE];
+bool isTransactionActive = false;
+bool waitingForWaitPin = false;
+
+unsigned long previousMillis0 = 0; 
+unsigned long previousMillis1 = 0; 
+void loop() {
+  nonBlockingSPITransfer();
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis0 >= 3) {
+    // Save the last time lv_timer_handler was called
+    previousMillis0 = currentMillis;
+
+    // Call lv_timer_handler
+    lv_timer_handler();
+    //remoteDisplay.pollRemoteCommand();    
+  }
+
+  if (currentMillis - previousMillis1 >= 15) {
+    // Save the last time lv_timer_handler was called
+    previousMillis1 = currentMillis;
+    static int pos = 0;
+    if(pos >135) pos=0;
+    lv_scale_set_image_needle_value(vfd_scale, play_pos_obj, pos);
+    Serial.printf("Pos: %d \n", pos);
+    pos++;
+
+
+  }
+
+}
+
+
+uint8_t calculateCRC(const uint8_t* data, size_t length) {
+  uint16_t crc = 0;
+  for (size_t i = 0; i < length; i++) {
+    crc += data[i];
+  }
+  return crc%256;
+}
+
+
+void nonBlockingSPITransfer() {
+  if (currentFrameIndex < sizeof(panelTxBuffer) / sizeof(panelTxBuffer[0])) {
+    if (!isTransactionActive) {
+      // Start a new frame transfer
+      memcpy(currentFrame, panelTxBuffer[currentFrameIndex], 11);
+      currentFrame[11] = calculateCRC(currentFrame, 11);
+      currentByteIndex = 0;
+      SPI.beginTransaction(panelSPI);
+      isTransactionActive = true;
+      waitingForWaitPin = false; // Reset wait pin flag
+    }
+
+    if (isTransactionActive) {
+      if (!waitingForWaitPin) {
+        // Check if WAIT_PIN is HIGH
+        if (digitalReadFast(WAIT_PIN) == HIGH) {
+          // Send the current byte and receive
+          rxBuffer[currentByteIndex] = SPI.transfer(currentFrame[currentByteIndex]);
+          byteStartTime = micros();
+          waitingForWaitPin = true; // Now wait for the byte delay
+
+          currentByteIndex++;
+
+          if (currentByteIndex >= FRAME_SIZE) {
+            // Frame transfer complete
+            slaveSPI.endTransaction();
+            isTransactionActive = false;
+            //printFrame("Received Frame:", rxBuffer, FRAME_SIZE);
+            frameStartTime = micros(); // Start the delay for the next frame
+            currentFrameIndex++;
+          }
+        }
+        // If WAIT_PIN is LOW, we do nothing and wait for it to go HIGH
+      } else {
+        // Waiting for the delay between bytes
+        if (micros() - byteStartTime >= BYTE_DELAY_US) {
+          waitingForWaitPin = false; // Byte delay finished, ready to send next byte
+        }
+      }
+    } else {
+      // Waiting for the delay between frames
+      if (micros() - frameStartTime >= FRAME_DELAY_US) {
+        // Ready to start the next frame
+      }
+    }
+  } else {
+    // All frames have been processed
+    // You can set a flag or perform other actions here
+    // to indicate the completion of the sequence.
+    // For continuous operation, you might want to reset currentFrameIndex here.
+    // currentFrameIndex = 0;
+  }
+}
+
+
+void createScreen(){
+  screen = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(screen, 320, 240);
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000),0);
+  lv_obj_align(screen, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_border_width(screen, 0,0);
+  lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+void createVFD(){
+  //lv_obj_t * vdf = lv_obj_create(screen);
+  //lv_obj_set_size(vdf, 240, 240);
+  //lv_obj_align(vdf,LV_ALIGN_CENTER, 0, 0);
+  LV_IMAGE_DECLARE(Background_240px);
+  LV_IMAGE_DECLARE(CDJ_CUE_MEMORY_240px);
+  LV_IMAGE_DECLARE(CDJ_TOUCH_INDICATOR_240px);
+  LV_IMAGE_DECLARE(CDJ_VINYL_INDICATOR_240px);
+  LV_IMAGE_DECLARE(CDJ_POS_MARKER_120px);
+
+  lv_obj_t * VDF_BG = lv_image_create(screen);
+  lv_image_set_src(VDF_BG, &Background_240px);
+  lv_obj_align(VDF_BG, LV_ALIGN_CENTER, -10, 0);
+
+
+  lv_obj_t * VDF_CUE_MEM = lv_image_create(VDF_BG);
+  lv_image_set_src(VDF_CUE_MEM, &CDJ_CUE_MEMORY_240px);
+  lv_obj_align(VDF_CUE_MEM, LV_ALIGN_CENTER, 0, 0);
+
+
+  lv_obj_t * VDF_TOUCH_IND = lv_image_create(VDF_BG);
+  lv_image_set_src(VDF_TOUCH_IND, &CDJ_TOUCH_INDICATOR_240px);
+  lv_obj_align(VDF_TOUCH_IND, LV_ALIGN_CENTER, 0, 0);
+
+
+  lv_obj_t * VDF_VINYL_IND = lv_image_create(VDF_BG);
+  lv_image_set_src(VDF_VINYL_IND, &CDJ_VINYL_INDICATOR_240px);
+  lv_obj_align(VDF_VINYL_IND, LV_ALIGN_CENTER, 0, 0);
+
+
+
+  vfd_scale = lv_scale_create(VDF_BG);
+  lv_obj_remove_style_all(vfd_scale);
+  lv_obj_set_size(vfd_scale, 240, 240);
+  lv_scale_set_mode(vfd_scale, LV_SCALE_MODE_ROUND_INNER);
+  lv_obj_set_style_bg_opa(vfd_scale, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(vfd_scale, lv_palette_lighten(LV_PALETTE_RED, 5), 0);
+  lv_obj_set_style_radius(vfd_scale, LV_RADIUS_CIRCLE, 0);
+  lv_scale_set_label_show(vfd_scale, false);
+
+  lv_obj_set_style_length(vfd_scale, 0, LV_PART_ITEMS);
+  lv_obj_set_style_length(vfd_scale, 0, LV_PART_INDICATOR);
+  lv_scale_set_range(vfd_scale, 0, 135);
+  lv_scale_set_angle_range(vfd_scale, 360);
+  lv_scale_set_rotation(vfd_scale, -90);
+  lv_obj_set_style_bg_opa(vfd_scale, LV_OPA_0, 0);
+ 
+  play_pos_obj = lv_image_create(vfd_scale);
+  lv_image_set_src(play_pos_obj, &CDJ_POS_MARKER_120px);
+  //For 320*320px object
+  //lv_obj_set_pos(play_pos_obj, 160, 141); 
+  //lv_image_set_pivot(play_pos_obj, 0, 19);
+  lv_obj_set_pos(play_pos_obj, 120, 105);
+  lv_image_set_pivot(play_pos_obj, -1, 15);
+ 
+  lv_scale_set_image_needle_value(vfd_scale, play_pos_obj, 0);
+
+}
+
+
+
+void mapMasterToPanel() {
+  // Frame 9 mappings
+  bitWrite(panelTxBuffer[0][9], 1, bitRead(masterRxBuffer[17], 0)); // PLAY LED
+  bitWrite(panelTxBuffer[0][9], 2, bitRead(masterRxBuffer[17], 1)); // CUE LED
+  bitWrite(panelTxBuffer[0][9], 0, bitRead(masterRxBuffer[17], 5)); // RED DIODE REVERSE
+  bitWrite(panelTxBuffer[0][9], 5, bitRead(masterRxBuffer[19], 3)); // MT red diode on button
+  bitWrite(panelTxBuffer[0][9], 4, bitRead(masterRxBuffer[19], 4)); // tempo reset green diode
+  bitWrite(panelTxBuffer[0][9], 7, bitRead(masterRxBuffer[19], 6)); // CDJ green diode
+  bitWrite(panelTxBuffer[0][9], 3, bitRead(masterRxBuffer[19], 7)); // SD card red diode
+
+  // Frame 10 mappings
+  bitWrite(panelTxBuffer[1][1], 6, bitRead(masterRxBuffer[17], 2)); // LOOP IN LED
+  bitWrite(panelTxBuffer[1][1], 7, bitRead(masterRxBuffer[17], 3)); // LOOP OUT LED
+  bitWrite(panelTxBuffer[1][1], 0, bitRead(masterRxBuffer[17], 6)); // RED DIODE HOT CUE A
+  bitWrite(panelTxBuffer[1][1], 1, bitRead(masterRxBuffer[17], 7)); // GREEN DIODE HOT CUE A
+  bitWrite(panelTxBuffer[1][1], 2, bitRead(masterRxBuffer[18], 1)); // RED DIODE HOT CUE B
+  bitWrite(panelTxBuffer[1][1], 3, bitRead(masterRxBuffer[18], 2)); // GREEN DIODE HOT CUE B
+  bitWrite(panelTxBuffer[1][1], 4, bitRead(masterRxBuffer[18], 4)); // RED DIODE HOT CUE C
+  bitWrite(panelTxBuffer[1][1], 5, bitRead(masterRxBuffer[18], 5)); // GREEN DIODE HOT CUE C
+  bitWrite(panelTxBuffer[1][2], 0, bitRead(masterRxBuffer[19], 5)); // Vinyl blue diode
+
+  // Handle Jog Display Position (CPOS)
+  if (masterRxBuffer[21] >= 1 && masterRxBuffer[21] <= 85) {
+    // Assuming the slave panel uses the same range or a directly proportional one
+    panelTxBuffer[0][10] = masterRxBuffer[21]; // Store in the last byte of frame 9 (adjust if needed)
+  } else {
+    panelTxBuffer[0][10] = 0; // Default or no cue on jog display
+  }
+
+  // Handle "Vinyl ON" VFD lamp
+  if (bitRead(masterRxBuffer[23], 3) && bitRead(masterRxBuffer[23], 4)) {
+    // Assuming a specific bit in the panelTxBuffer controls this, adjust accordingly
+    // Example: Setting bit 0 of the last byte in frame 1
+    bitSet(panelTxBuffer[1][11], 0);
+  } else {
+    bitClear(panelTxBuffer[1][11], 0);
+  }
+
+  // Handle "touch enable" circle on VFD lamp
+  if (bitRead(masterRxBuffer[23], 5)) {
+    // Assuming a specific bit in the panelTxBuffer controls this, adjust accordingly
+    // Example: Setting bit 1 of the last byte in frame 1
+    bitSet(panelTxBuffer[1][11], 1);
+  } else {
+    bitClear(panelTxBuffer[1][11], 1);
+  }
+
+  // Handle "memory empty" circle on VFD lamp
+  if (bitRead(masterRxBuffer[23], 6)) {
+    // Assuming a specific bit in the panelTxBuffer controls this, adjust accordingly
+    // Example: Setting bit 2 of the last byte in frame 1
+    bitSet(panelTxBuffer[1][11], 2);
+  } else {
+    bitClear(panelTxBuffer[1][11], 2);
+  }
+
+  // Handle Jog Display Position (POS) - Eject, Load, Fill Circle
+  if (masterRxBuffer[25] == 138) {
+    // Eject animation - Map to a specific control in panelTxBuffer
+    // Example: Set a specific byte to a specific value
+    panelTxBuffer[1][3] = 0xAA; // Adjust as needed
+  } else if (masterRxBuffer[25] == 137) {
+    // Load in animation - Map to a specific control
+    panelTxBuffer[1][3] = 0xBB; // Adjust as needed
+  } else if (masterRxBuffer[25] == 136) {
+    // Fill circle on display - Map to a specific control
+    panelTxBuffer[1][3] = 0xCC; // Adjust as needed
+  } else if (masterRxBuffer[25] >= 1 && masterRxBuffer[25] <= 135) {
+    // Jog display position cursor - Map to a specific control
+    // Assuming a direct mapping or a scaled one
+    panelTxBuffer[1][4] = masterRxBuffer[25]; // Adjust the target byte as needed
+  } else {
+    // Handle other POS values if necessary
+  }
+}
+
+
+void mapPanelToMaster() {
+  // ADC Data
+  masterTxBuffer[2] = panelRxBuffer[8];   // ADC data TOUCH/BRAKE
+  masterTxBuffer[3] = panelRxBuffer[9];   // ADC data RELEASE/START
+
+  // Pitch Data (Assuming panelRxBuffer doesn't send this back, so leaving as is or setting to default)
+  // masterTxBuffer[4] = ; // ADC Pitch MSB [AAAA]
+  // masterTxBuffer[5] = ; // ADC Pitch LSB [AA00]
+  // masterTxBuffer[6] = ; // ADC Pitch Center Potentiometer MSB [AAAA]
+  // masterTxBuffer[7] = ; // ADC Pitch Center Potentiometer LSB [AA00]
+
+  // Jog Pulse Counter (Assuming panelRxBuffer doesn't send this back)
+  // masterTxBuffer[8] = ; // Jog Pulse Counter MSB
+  // masterTxBuffer[9] = ; // Jog Pulse Counter LSB
+
+  // Jog Speed (Assuming panelRxBuffer doesn't send this back)
+  // masterTxBuffer[10] = ; // Jog Speed MSB
+  // masterTxBuffer[11] = ; // Jog Speed LSB
+
+  // Byte 12
+  // bitWrite(masterTxBuffer[12], 0, bitRead(panelRxBuffer[6], 4)); // Eject Lock switch
+  if (bitRead(panelRxBuffer[6], 4)) {
+    bitSet(masterTxBuffer[12], 0);
+  } else {
+    bitClear(masterTxBuffer[12], 0);
+  }
+
+  // bitWrite(masterTxBuffer[12], 1, bitRead(panelRxBuffer[7], 0)); // Direction switch
+  if (bitRead(panelRxBuffer[7], 0)) {
+    bitSet(masterTxBuffer[12], 1);
+  } else {
+    bitClear(masterTxBuffer[12], 1);
+  }
+  // bitWrite(masterTxBuffer[12], 2, 0); // [12 byte][bit2] = 0
+  bitClear(masterTxBuffer[12], 2);
+  // bitWrite(masterTxBuffer[12], 3, 0); // [12 byte][bit3] = 0
+  bitClear(masterTxBuffer[12], 3);
+  // bitWrite(masterTxBuffer[12], 4, ); // jog touch enable (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[12], 5, ); // jog touch enable (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[12], 6, ); // jog forward/reverse rotation (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[12], 7, ); // jog rotation detect (not present in panelRxBuffer description)
+
+  // Byte 14
+  // bitWrite(masterTxBuffer[14], 0, ); // PLAY button (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[14], 1, bitRead(panelRxBuffer[3], 6)); // CUE button
+  if (bitRead(panelRxBuffer[3], 6)) {
+    bitSet(masterTxBuffer[14], 1);
+  } else {
+    bitClear(masterTxBuffer[14], 1);
+  }
+  // bitWrite(masterTxBuffer[14], 2, bitRead(panelRxBuffer[5], 7)); // Loop IN button
+  if (bitRead(panelRxBuffer[5], 7)) {
+    bitSet(masterTxBuffer[14], 2);
+  } else {
+    bitClear(masterTxBuffer[14], 2);
+  }
+  // bitWrite(masterTxBuffer[14], 3, bitRead(panelRxBuffer[5], 6)); // Loop OUT button
+  if (bitRead(panelRxBuffer[5], 6)) {
+    bitSet(masterTxBuffer[14], 3);
+  } else {
+    bitClear(masterTxBuffer[14], 3);
+  }
+  // bitWrite(masterTxBuffer[14], 4, bitRead(panelRxBuffer[5], 5)); // Reloop/Exit button
+  if (bitRead(panelRxBuffer[5], 5)) {
+    bitSet(masterTxBuffer[14], 4);
+  } else {
+    bitClear(masterTxBuffer[14], 4);
+  }
+  // bitWrite(masterTxBuffer[14], 5, bitRead(panelRxBuffer[4], 7)); // Hot Cue A button
+  if (bitRead(panelRxBuffer[4], 7)) {
+    bitSet(masterTxBuffer[14], 5);
+  } else {
+    bitClear(masterTxBuffer[14], 5);
+  }
+  // bitWrite(masterTxBuffer[14], 6, bitRead(panelRxBuffer[4], 6)); // Hot Cue B button
+  if (bitRead(panelRxBuffer[4], 6)) {
+    bitSet(masterTxBuffer[14], 6);
+  } else {
+    bitClear(masterTxBuffer[14], 6);
+  }
+  // bitWrite(masterTxBuffer[14], 7, bitRead(panelRxBuffer[4], 5)); // Hot Cue C button
+  if (bitRead(panelRxBuffer[4], 5)) {
+    bitSet(masterTxBuffer[14], 7);
+  } else {
+    bitClear(masterTxBuffer[14], 7);
+  }
+
+  // Byte 16
+  // bitWrite(masterTxBuffer[16], 0, bitRead(panelRxBuffer[4], 4)); // REC MODE
+  if (bitRead(panelRxBuffer[4], 4)) {
+    bitSet(masterTxBuffer[16], 0);
+  } else {
+    bitClear(masterTxBuffer[16], 0);
+  }
+  // bitWrite(masterTxBuffer[16], 1, bitRead(panelRxBuffer[2], 4)); // << Track search
+  if (bitRead(panelRxBuffer[2], 4)) {
+    bitSet(masterTxBuffer[16], 1);
+  } else {
+    bitClear(masterTxBuffer[16], 1);
+  }
+  // bitWrite(masterTxBuffer[16], 2, ); // Track search >> (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[16], 3, ); // << Search (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[16], 4, ); // Search >> (not present in panelRxBuffer description)
+  // bitWrite(masterTxBuffer[16], 5, 0); // [16 byte][bit5] = 0
+  bitClear(masterTxBuffer[16], 5);
+  // bitWrite(masterTxBuffer[16], 6, 0); // [16 byte][bit6] = 0
+  bitClear(masterTxBuffer[16], 6);
+  // bitWrite(masterTxBuffer[16], 7, 0); // [16 byte][bit7] = 0
+  bitClear(masterTxBuffer[16], 7);
+
+  // Byte 17
+  // bitWrite(masterTxBuffer[17], 0, bitRead(panelRxBuffer[5], 4)); // < MP3 FOLDER SEARCH
+  if (bitRead(panelRxBuffer[5], 4)) {
+    bitSet(masterTxBuffer[17], 0);
+  } else {
+    bitClear(masterTxBuffer[17], 0);
+  }
+  // bitWrite(masterTxBuffer[17], 1, bitRead(panelRxBuffer[6], 1)); // MP3 FOLDER SEARCH >
+  if (bitRead(panelRxBuffer[6], 1)) {
+    bitSet(masterTxBuffer[17], 1);
+  } else {
+    bitClear(masterTxBuffer[17], 1);
+  }
+  // bitWrite(masterTxBuffer[17], 2, bitRead(panelRxBuffer[6], 2)); // JOG MODE button
+  if (bitRead(panelRxBuffer[6], 2)) {
+    bitSet(masterTxBuffer[17], 2);
+  } else {
+    bitClear(masterTxBuffer[17], 2);
+  }
+  // bitWrite(masterTxBuffer[17], 3, bitRead(panelRxBuffer[6], 7)); // TEMPO button
+  if (bitRead(panelRxBuffer[6], 7)) {
+    bitSet(masterTxBuffer[17], 3);
+  } else {
+    bitClear(masterTxBuffer[17], 3);
+  }
+  // bitWrite(masterTxBuffer[17], 4, bitRead(panelRxBuffer[6], 6)); // MASTER TEMPO button
+  if (bitRead(panelRxBuffer[6], 6)) {
+    bitSet(masterTxBuffer[17], 4);
+  } else {
+    bitClear(masterTxBuffer[17], 4);
+  }
+  // bitWrite(masterTxBuffer[17], 5, bitRead(panelRxBuffer[6], 5)); // TEMPO RESET button
+  if (bitRead(panelRxBuffer[6], 5)) {
+    bitSet(masterTxBuffer[17], 5);
+  } else {
+    bitClear(masterTxBuffer[17], 5);
+  }
+  // bitWrite(masterTxBuffer[17], 6, 0); // [17 byte][bit6] = 0
+  bitClear(masterTxBuffer[17], 6);
+  // bitWrite(masterTxBuffer[17], 7, 0); // [17 byte][bit7] = 0
+  bitClear(masterTxBuffer[17], 7);
+
+  // Byte 18
+  // bitWrite(masterTxBuffer[18], 0, bitRead(panelRxBuffer[6], 0)); // CALL >
+  if (bitRead(panelRxBuffer[6], 0)) {
+    bitSet(masterTxBuffer[18], 0);
+  } else {
+    bitClear(masterTxBuffer[18], 0);
+  }
+  // bitWrite(masterTxBuffer[18], 1, bitRead(panelRxBuffer[5], 3)); // < CALL
+  if (bitRead(panelRxBuffer[5], 3)) {
+    bitSet(masterTxBuffer[18], 1);
+  } else {
+    bitClear(masterTxBuffer[18], 1);
+  }
+
+  // Remaining bytes in masterTxBuffer are not mapped from panelRxBuffer
+  // masterTxBuffer[0] = ;
+  // masterTxBuffer[1] = ;
+  // masterTxBuffer[13] = ;
+  // masterTxBuffer[15] = ;
+  // masterTxBuffer[19] = ;
+  // masterTxBuffer[20] = ;
+  // masterTxBuffer[21] = ;
+  // masterTxBuffer[22] = ;
+  // masterTxBuffer[23] = ;
+  // masterTxBuffer[24] = ;
+  // masterTxBuffer[25] = ;
+  // masterTxBuffer[26] = ;
+}
