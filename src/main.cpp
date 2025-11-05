@@ -178,10 +178,12 @@ void setup() {
 
 
   //JOG Wheek pin setups
-  pinMode(JOG0, INPUT);
-  pinMode(JOG1, INPUT);
+  //pinMode(JOG0, INPUT);
+  pinMode(JOG_PULSE, INPUT);
+  jogEncoder.setInitConfig();
+  jogEncoder.init();
   //pinMode(JOG_TOUCH, INPUT);
-  attachInterrupt(digitalPinToInterrupt(JOG0), jogISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(JOG_PULSE), jogISR, RISING);
 
   //JOG Touch sensor Debounce setup
   touchDebouncer.attach(JOG_TOUCH, INPUT_PULLUP);
@@ -243,6 +245,11 @@ void loop() {
   if (currentMillis - previousMillis1 >=20) {
     // Save the last time lv_timer_handler was called
     previousMillis1 = currentMillis;
+    if (jogTouched) {
+    masterRxBuffer[3] |= 0x01;   // Set bit
+} else {
+    masterRxBuffer[3] &= ~0x01;  // Clear bit
+}
     updateVFD();
   }
 

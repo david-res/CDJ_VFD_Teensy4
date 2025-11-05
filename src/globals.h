@@ -18,13 +18,19 @@ DMAMEM uint16_t fb2[320*320] __attribute__ ((aligned(32)));
 #define CDJ_RST 38
 
 #define JOG_TOUCH 30
-#define JOG_PULSE 16
+#define JOG_PULSE 25
 #define JOG0 4
 #define JOG1 5
 
 #define ADCT A0
 #define ADIN A1
 #define LCD_BL 2
+
+#define MOSI_PIN 35
+#define MISO_PIN 34
+#define SCLK_PIN 37
+#define WAIT_PIN 38 // Pin to wait until HIGH
+#define RESET_PIN 39 // RST line
 
 
 
