@@ -2,9 +2,10 @@
 //#include "RemoteDisplay.h"
 #include "lvgl.h"
 #include "SPI.h"
-//#include "SPISlave_T4.h"
+#include "T4_DMA_SPI_SLAVE.h"
 #include "QuadEncoder.h"
 #include "T4_DMA_SPI_SLAVE.h"
+#include "SPIComm.h"
 #include "ST7796s_t4_mm.h"
 #include "Bounce2.h"
 #include "globals.h"
@@ -16,8 +17,8 @@ uint8_t spi_slave_RXbuf[BYTE_BUF_SIZE];
 
 //SPISlave_T4<&SPI, SPI_8_BITS> slaveSPI; // Slave settings for the main control unit to control this Teensy. It will be sening and reciving masterRxBuffer and masterTxBuffer
 //Slave is on SPI1
-SPISettings panelSPI(2000000, LSBFIRST, SPI_MODE3); // Master settings for controlling the CDJ1000 MK1 control panel. It needs bus speed set at 1Mhz, SPI mode3 and LSB first.
-//CDJ Panel is on SPI2
+// Create SPIComm instance
+SPIComm spiComm(CDJ_MOSI_PIN, CDJ_MISO_PIN, CDJ_SCLK_PIN, CDJ_WAIT_PIN, CDJ_RESET_PIN);
 
 ST7796s_t4_mm lcd = ST7796s_t4_mm(ST7796_DC, ST7796_CS, ST7796_RST);
 
@@ -51,6 +52,7 @@ bool jogMoving = false;
 bool touchLatched = false;
 bool touchActive = false;
 bool jogTouched = false;  // Final indicator
+bool jogDirection = true; //true = forward, false = reverse
 
 
 Bounce touchDebouncer = Bounce();
@@ -112,7 +114,7 @@ void dataTimerISR() {
   masterTxBuffer[15] = jogVelocity & 0xFF;          // JOG POSITION LSB
   masterTxBuffer[16] = (jogMoving ? 1 : 0);         // JOG direction
   masterTxBuffer[16] |= (jogTouched ? 1 : 0) << 1;  // JOG touch enable
-
+  masterRxBuffer[16] =
   //Last masterTxBuffer[17] is CRC 
   masterTxBuffer[17] = calculateCRC((uint8_t*)masterTxBuffer, 17);
 
@@ -161,12 +163,24 @@ void setup() {
   //}
   Serial.println("Begin Setup");
 
+  //Init SPI Slave on SPI1
+  slaveSPI.begin(SPI_MODE0, MSBFIRST, MODE_4WIRE);
+  slaveSPI.auto_repeat = 1;
+  slaveSPI.prepare_for_slave_transfer(slave_TXbuf, slave_RXbuf, 18);
+
   //slaveSPI.begin(SPI_MODE0, MSBFIRST, MODE_4WIRE);
   //slaveSPI.auto_repeat = 1;
   //slaveSPI.print_pin_use();
   //slaveSPI.prepare_for_slave_transfer(spi_slave_TXbuf, spi_slave_RXbuf, 27);
-  pinMode(CDJ_WAIT, INPUT);
-  pinMode(CDJ_RST, OUTPUT);
+
+
+  // Set custom input frames (pass as flat array)
+  spiComm.setFrames((uint8_t*)panelTxBuffer, (sizeof(panelTxBuffer) / sizeof(panelTxBuffer[0])), 11);
+  // Set output buffer to receive responses (same buffer reused for each frame)
+  spiComm.setOutputBuffer(panelRxBuffer);
+
+  // Initialize the SPI communication
+  spiComm.begin();
 
   digitalWriteFast(CDJ_RST, LOW);
   delay(100);
@@ -237,19 +251,41 @@ void loop() {
     // Call lv_timer_handler
     lv_timer_handler();   
   }
+
+  spiComm.update();
+
+  //Copy data from/to SPI slave if transaction completed
+  if (slaveSPI.flag_transaction_completed)
+  {
+    for (int i=0; i<18; i++)
+    {
+        masterRxBuffer[i] = slave_RXbuf[i]; // Copy received data to masterRxBuffer
+        slave_TXbuf[i] = masterTxBuffer[i]; // Load data to be sent from masterTxBuffer
+    }
+    slaveSPI.flag_transaction_completed = 0;
+  }
   
 
-  nonBlockingSPITransfer();
+  //nonBlockingSPITransfer();
 
   
   if (currentMillis - previousMillis1 >=20) {
     // Save the last time lv_timer_handler was called
     previousMillis1 = currentMillis;
     if (jogTouched) {
-    masterRxBuffer[3] |= 0x01;   // Set bit
-} else {
-    masterRxBuffer[3] &= ~0x01;  // Clear bit
-}
+    masterTxBuffer[16] |= 0x02;   // Set bit
+    } else {
+    masterTxBuffer[16] &= ~0x02;  // Clear bit
+    }
+
+    if(jogDirection){
+      masterTxBuffer[16] |= 0x01;   // Set bit
+    } else {
+      masterTxBuffer[16] &= ~0x01;  // Clear bit  
+    }
+
+
+
     updateVFD();
   }
 
@@ -294,18 +330,6 @@ void loop() {
       lastPrintedPos = pos;
     }
   }
-
-/*
-  if (slaveSPI.flag_transaction_completed)
-    {
-      for (int i=0; i<27; i++)
-      {
-          masterRxBuffer[i] = spi_slave_RXbuf[i];
-          masterTxBuffer[i] = spi_slave_TXbuf[i];
-      }
-      slaveSPI.flag_transaction_completed = 0;
-    }
-*/
 }
 
 
@@ -323,60 +347,6 @@ void printFrame(const char* label, const uint8_t* data, size_t length) {
     Serial.printf(" 0x%02X", data[i]);
   }
   Serial.println();
-}
-
-void nonBlockingSPITransfer() {
-  if (currentFrameIndex < sizeof(panelTxBuffer) / sizeof(panelTxBuffer[0])) {
-    if (!isTransactionActive) {
-      // Start a new frame transfer
-      memcpy(currentFrame, panelTxBuffer[currentFrameIndex], 11);
-      currentFrame[11] = calculateCRC(currentFrame, 11);
-      currentByteIndex = 0;
-      SPI2.beginTransaction(panelSPI);
-      isTransactionActive = true;
-      waitingForWaitPin = false; // Reset wait pin flag
-    }
-
-    if (isTransactionActive) {
-      if (!waitingForWaitPin) {
-        // Check if WAIT_PIN is HIGH
-        if (digitalReadFast(CDJ_WAIT) == HIGH) {
-          // Send the current byte and receive
-          rxBuffer[currentByteIndex] = SPI2.transfer(currentFrame[currentByteIndex]);
-          byteStartTime = micros();
-          waitingForWaitPin = true; // Now wait for the byte delay
-
-          currentByteIndex++;
-
-          if (currentByteIndex >= FRAME_SIZE) {
-            // Frame transfer complete
-            SPI2.endTransaction();
-            isTransactionActive = false;
-            printFrame("Received Frame:", rxBuffer, FRAME_SIZE);
-            frameStartTime = micros(); // Start the delay for the next frame
-            currentFrameIndex++;
-          }
-        }
-        // If WAIT_PIN is LOW, we do nothing and wait for it to go HIGH
-      } else {
-        // Waiting for the delay between bytes
-        if (micros() - byteStartTime >= BYTE_DELAY_US) {
-          waitingForWaitPin = false; // Byte delay finished, ready to send next byte
-        }
-      }
-    } else {
-      // Waiting for the delay between frames
-      if (micros() - frameStartTime >= FRAME_DELAY_US) {
-        // Ready to start the next frame
-      }
-    }
-  } else {
-    // All frames have been processed
-    // You can set a flag or perform other actions here
-    // to indicate the completion of the sequence.
-    // For continuous operation, you might want to reset currentFrameIndex here.
-    currentFrameIndex = 0;
-  }
 }
 
 

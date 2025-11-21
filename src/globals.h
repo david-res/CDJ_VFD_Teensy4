@@ -26,11 +26,21 @@ DMAMEM uint16_t fb2[320*320] __attribute__ ((aligned(32)));
 #define ADIN A1
 #define LCD_BL 2
 
-#define MOSI_PIN 35
-#define MISO_PIN 34
-#define SCLK_PIN 37
-#define WAIT_PIN 38 // Pin to wait until HIGH
-#define RESET_PIN 39 // RST line
+
+//SPI2 Pins on TMM for CDJ Panel
+#define CDJ_MOSI_PIN 35
+#define CDJ_MISO_PIN 34
+#define CDJ_SCLK_PIN 37
+#define CDJ_WAIT_PIN 38 // Pin to wait until HIGH
+#define CDJ_RESET_PIN 39 // RST line
+
+
+//SPI1 on TMM for SlaveSPI
+#define slaveSPI SPI_SLAVE1
+#define BYTE_BUF_SIZE 512
+
+uint8_t slave_TXbuf[BYTE_BUF_SIZE];
+uint8_t slave_RXbuf[BYTE_BUF_SIZE];
 
 
 
@@ -83,7 +93,7 @@ uint8_t masterRxBuffer[18];
 
 
 */
-uint8_t panelTxBuffer[2][12]={
+uint8_t panelTxBuffer[2][11]={
   {0x9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00}, 
   {0xA, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 };
