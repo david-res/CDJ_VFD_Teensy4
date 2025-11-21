@@ -31,8 +31,9 @@ DMAMEM uint16_t fb2[320*320] __attribute__ ((aligned(32)));
 #define CDJ_MOSI_PIN 35
 #define CDJ_MISO_PIN 34
 #define CDJ_SCLK_PIN 37
-#define CDJ_WAIT_PIN 38 // Pin to wait until HIGH
-#define CDJ_RESET_PIN 39 // RST line
+#define CDJ_RESET_PIN 38 // RST line
+#define CDJ_WAIT_PIN 39 // Pin to wait until HIGH
+
 
 
 //SPI1 on TMM for SlaveSPI

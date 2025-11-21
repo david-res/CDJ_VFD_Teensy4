@@ -1,5 +1,6 @@
 #include "SPIComm.h"
 
+//#define DEBUG_PRINT  // Comment out this line to disable debug prints
 #define SPIbus SPI2 
 
 // Define the default frames data
@@ -42,7 +43,9 @@ void SPIComm::begin() {
   digitalWriteFast(_sclkPin, HIGH);
   digitalWriteFast(_resetPin, HIGH);
   
+#ifdef DEBUG_PRINT
   Serial.println("SPIComm: Initializing...");
+#endif
 
   // Initialize SPI
   SPIbus.begin();
@@ -52,7 +55,9 @@ void SPIComm::begin() {
   _stateTimer = millis();
   _initialized = true;
   
+#ifdef DEBUG_PRINT
   Serial.println("SPIComm: Setup Complete!");
+#endif
 }
 
 void SPIComm::setFrames(uint8_t* frames, size_t numFrames, size_t frameSize) {
@@ -111,8 +116,10 @@ void SPIComm::update() {
 
     case STATE_BEGIN_TRANSACTION:
       if (_currentFrameIndex == 0 && _currentByteIndex == 0) {
+#ifdef DEBUG_PRINT
         Serial.println("----------------Start sequence-----------------");
         Serial.println("");
+#endif
       }
       
       // Prepare the current frame from custom or default frames
@@ -153,6 +160,7 @@ void SPIComm::update() {
             memcpy(_outputBuffer, _rxBuffer, 12);
           }
           
+#ifdef DEBUG_PRINT
           // Print received frame with checksum status
           printFrame("Received Frame:", _rxBuffer, 12);
           if (checksumValid) {
@@ -160,6 +168,7 @@ void SPIComm::update() {
           } else {
             Serial.println("  ✗ Checksum invalid!");
           }
+#endif
           
           _currentState = STATE_END_TRANSACTION;
         } else {
@@ -190,8 +199,10 @@ void SPIComm::update() {
       break;
 
     case STATE_SEQUENCE_COMPLETE:
+#ifdef DEBUG_PRINT
       Serial.println("");
       Serial.println("----------------End sequence-----------------");
+#endif
       _currentFrameIndex = 0;
       // Automatically restart the sequence
       _currentState = STATE_BEGIN_TRANSACTION;
@@ -245,9 +256,11 @@ bool SPIComm::validateChecksum(const uint8_t* data, size_t length) {
 }
 
 void SPIComm::printFrame(const char* label, const uint8_t* data, size_t length) {
+#ifdef DEBUG_PRINT
   Serial.print(label);
   for (size_t i = 0; i < length; i++) {
     Serial.printf(" 0x%02X", data[i]);
   }
   Serial.println();
+#endif
 }
